@@ -8,7 +8,7 @@ A professional network diagnostic tool written in Python to perform **Path MTU (
 
 - **Binary-Search Path MTU Sweep** — Uses ICMP Echo Requests with the DF (Don't Fragment) bit set to find the bottleneck MTU.
 - **Baseline Responsiveness Validation** — Probes the target with small ICMP packets first to verify ICMP responsiveness, preventing noisy pings on hosts that block ICMP completely.
-- **Robust Binary Search & Silent Drop Detection** — Resilient to transient packet loss and rate-limiting. If the target is verified as ICMP-responsive, persistent timeouts at larger sizes are treated as silent drops (MTU exceeded) rather than aborting.
+- **Robust Binary Search Logic** — Resilient to transient packet loss and rate-limiting. Uses retries and abort thresholds to prevent false PMTU reductions.
 - **Fallback TCP-MSS Analysis** — Proceeds to retrieve `TCP_MAXSEG` and analyze TCP clamping even if the host blocks ICMP or PMTU cannot be determined.
 - **ICMP Frag Needed Validation** — Extracts next-hop MTU feedback from ICMP Destination Unreachable replies, supporting verified quotes and truncated RFC1191 responses.
 - **TCP-MSS Handshake Negotiation** — Connects via TCP and reads the kernel's negotiated `TCP_MAXSEG` socket option.
@@ -30,7 +30,7 @@ The script constructs custom ICMP Echo Requests using raw sockets with the DF bi
 
 1. **ICMP Baseline Probe**: The script first tests the target with baseline ICMP packets to verify if it responds to ping. If the target does not respond, PMTU discovery is skipped, and it falls back immediately to TCP Analysis.
 2. **Adaptive Binary Search**: A binary search sweeps payload sizes from 500 up to the configured limit (default: 1500 bytes).
-3. **Silent Drop Handling**: If a packet exceeds the path MTU, routers ideally return ICMP Type 3 Code 4 (Fragmentation Needed). If no reply is received (a timeout), but the host was verified as ICMP-responsive, the tool treats it as a silent drop, adjusting search bounds downward (`high = mid - 1`) rather than failing.
+3. **Robust Loss Handling**: If a packet exceeds the path MTU, routers ideally return ICMP Type 3 Code 4 (Fragmentation Needed). If no reply is received (a timeout), the search is retried with backoff. If three consecutive probes at different sizes result in unconfirmed timeouts, the search is gracefully aborted with a warning to the operator (relying on the best verified MTU so far) rather than making a false reduction.
 
 ```
 MTU = Optimal Payload + 8 (ICMP Header) + 20 (IPv4 Header)
