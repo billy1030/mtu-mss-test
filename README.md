@@ -80,33 +80,54 @@ wsl sudo python3 mtu-mss-tester-linux.py 10.0.0.1 443 9000
 
 ## Example Output
 
+```text
+============================================================
+  PYTHON MTU & TCP-MSS TESTER
+============================================================
+  Target Host: www.google.com
+  TCP Port:    443
+  Timestamp:   2026-06-03 13:21:58
+------------------------------------------------------------
+  Sweeping Path MTU to www.google.com...
+  Sweeping payload sizes [500 to 1500]...
+
+  DETECTED PATH MTU: 1420 bytes
+
+--- Verifying MTU with ICMP Frag Needed ---
+  Could not determine exact MTU from ICMP feedback
+
+--- Attempting to locate clamping point ---
+  Establishing TCP handshake to www.google.com:443...
+
+  DETAILED PATH ANALYSIS
+------------------------------------------------------------
+  Local Address:     172.17.224.164
+  Remote Address:    142.251.155.119
+  Detected Path MTU: 1420 bytes
+  Clamping Router:   Not identified (no ICMP Unreachable received)
+  IP Version:        IPv4
+  Negotiated TCP-MSS: 1400 bytes
+  Expected IPv4 MSS:  1380 bytes (MTU-40)
+  Expected IPv6 MSS:  1360 bytes (MTU-60)
+  TCP-MSS Overhead:  -20 bytes
+
+  ANALYSIS:
+------------------------------------------------------------
+  Path MTU = 1420
+  MSS      = 1400
+  Expected = 1380
+  Gap      = -20 bytes
+
+  MSS reduced by 4 bytes - consistent with 802.1Q VLAN tag.
+
+  No ICMP 'Frag needed' response received - the clamping point
+  may silently drop oversized packets or rewrite MSS without ICMP.
+
+  MTU reduced from 1500 to 1420 (80 bytes lost)
+  MSS clamp matches MTU reduction exactly.
+============================================================
 ```
-============================================================
-PMTU & TCP_MAXSEG ANALYZER
-============================================================
-Target Host : 8.8.8.8
-Target Port : 443
-Max MTU Limit: 1500
 
-Discovering Path MTU (Max limit: 1500)...
-
-Resolved IP : 8.8.8.8
-Path MTU    : 1500
-
-Theoretical MSS Values
-----------------------
-IPv4 MSS = 1460
-IPv6 MSS = 1440
-
-TCP Analysis
-------------
-Local Address : 192.168.1.50
-Remote Address: 8.8.8.8
-TCP_MAXSEG    : 1460
-Difference    : 0
-Consistent with PMTU.
-============================================================
-```
 
 ---
 
