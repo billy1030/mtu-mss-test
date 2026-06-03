@@ -86,49 +86,38 @@ wsl sudo python3 mtu-mss-tester-linux.py 10.0.0.1 443 9000
 
 ```text
 ============================================================
-  PYTHON MTU & TCP-MSS TESTER
+PMTU & TCP_MAXSEG ANALYZER
 ============================================================
-  Target Host: www.google.com
-  TCP Port:    443
-  Timestamp:   2026-06-03 13:21:58
-------------------------------------------------------------
-  Sweeping Path MTU to www.google.com...
-  Sweeping payload sizes [500 to 1500]...
+Target Host : www.google.com
+Target Port : 443
+Max MTU Limit: 1500
 
-  DETECTED PATH MTU: 1420 bytes
+Discovering Path MTU (Max limit: 1500)...
 
---- Verifying MTU with ICMP Frag Needed ---
-  Could not determine exact MTU from ICMP feedback
+Verifying target ICMP responsiveness...
+Target is ICMP responsive. Starting binary search...
 
---- Attempting to locate clamping point ---
-  Establishing TCP handshake to www.google.com:443...
+Resolved IP : 142.251.150.119
+Path MTU    : 1420
 
-  DETAILED PATH ANALYSIS
-------------------------------------------------------------
-  Local Address:     172.17.224.164
-  Remote Address:    142.251.155.119
-  Detected Path MTU: 1420 bytes
-  Clamping Router:   Not identified (no ICMP Unreachable received)
-  IP Version:        IPv4
-  Negotiated TCP-MSS: 1400 bytes
-  Expected IPv4 MSS:  1380 bytes (MTU-40)
-  Expected IPv6 MSS:  1360 bytes (MTU-60)
-  TCP-MSS Overhead:  -20 bytes
+Theoretical MSS Values
+----------------------
+IPv4 MSS = 1380
+IPv6 MSS = 1360
 
-  ANALYSIS:
-------------------------------------------------------------
-  Path MTU = 1420
-  MSS      = 1400
-  Expected = 1380
-  Gap      = -20 bytes
+TCP Analysis
+------------
+Local Address : 172.17.224.164
+Remote Address: 142.251.156.119
+TCP_MAXSEG    : 1368
+Difference    : 12
+TCP_MAXSEG lower than theoretical PMTU MSS.
+Possible tunnel, VPN, stack tuning, or MSS clamping.
 
-  MSS reduced by 4 bytes - consistent with 802.1Q VLAN tag.
-
-  No ICMP 'Frag needed' response received - the clamping point
-  may silently drop oversized packets or rewrite MSS without ICMP.
-
-  MTU reduced from 1500 to 1420 (80 bytes lost)
-  MSS clamp matches MTU reduction exactly.
+NOTE:
+TCP_MAXSEG reflects the local kernel MSS.
+This tool cannot definitively prove MSS rewriting by a firewall or load balancer.
+For authoritative MSS-clamp detection, inspect SYN/SYN-ACK packets with Scapy, tcpdump, Wireshark, or packet capture.
 ============================================================
 ```
 
