@@ -217,6 +217,7 @@ def discover_pmtu(host, max_mtu=1500):
 
     best = 0
     best_frag_mtu = None
+    consecutive_unknowns = 0
     search_incomplete = False
 
     while low <= high:
@@ -237,13 +238,20 @@ def discover_pmtu(host, max_mtu=1500):
         if result == STATE_SUCCESS:
             best = mid
             low = mid + 1
+            consecutive_unknowns = 0
         elif result == STATE_FAIL:
             if mtu:
                 best_frag_mtu = mtu
             high = mid - 1
+            consecutive_unknowns = 0
         else:
-            # Since target is ICMP responsive, persistent timeout is treated as a silent drop
-            high = mid - 1
+            consecutive_unknowns += 1
+            if consecutive_unknowns >= 3:
+                search_incomplete = True
+                break
+            # Do not modify bounds (low/high) on transient/unconfirmed UNKNOWN.
+            # Continue the loop to retry the mid size.
+            continue
 
     sock.close()
 
