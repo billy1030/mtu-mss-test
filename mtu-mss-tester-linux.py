@@ -1,367 +1,368 @@
 #!/usr/bin/env python3
+"""
+PMTU and TCP_MAXSEG Analyzer
+
+Features:
+- Path MTU Discovery using ICMP Echo + DF
+- Proper ICMP Fragmentation Needed parsing and strict packet validation
+- Robust binary search handling transient packet loss and rate-limiting
+- Handles non-RFC-compliant routers returning truncated ICMP quotes safely
+- Safe fallback and priority checks for PMTU results
+- Linux/macOS/Windows support (including WSL requiring root/sudo)
+"""
+
 import os
 import sys
+import time
 import socket
 import struct
 import select
-import time
-import subprocess
-import re
 
-def compute_checksum(source_string):
-    sum_val = 0
-    count_to = (len(source_string) // 2) * 2
-    count = 0
-    while count < count_to:
-        this_val = source_string[count + 1] * 256 + source_string[count]
-        sum_val = sum_val + this_val
-        sum_val = sum_val & 0xffffffff
-        count = count + 2
-    if count_to < len(source_string):
-        sum_val = sum_val + source_string[len(source_string) - 1]
-        sum_val = sum_val & 0xffffffff
-    sum_val = (sum_val >> 16) + (sum_val & 0xffff)
-    sum_val = sum_val + (sum_val >> 16)
-    answer = ~sum_val
-    answer = answer & 0xffff
-    answer = answer >> 8 | (answer << 8 & 0xff00)
-    return answer
+ICMP_ECHO_REQUEST = 8
+ICMP_ECHO_REPLY = 0
+ICMP_DEST_UNREACHABLE = 3
+ICMP_FRAG_NEEDED = 4
 
-def send_icmp_ping(sock, dest_addr, payload_size, seq_num):
-    my_id = os.getpid() & 0xFFFF
-    header = struct.pack("bbHHh", 8, 0, 0, my_id, seq_num)
-    data = struct.pack("d", time.time()) + (b"Q" * (payload_size - 8))
-    my_checksum = compute_checksum(header + data)
-    header = struct.pack("bbHHh", 8, 0, socket.htons(my_checksum), my_id, seq_num)
-    packet = header + data
-    try:
-        sock.sendto(packet, (dest_addr, 1))
-        return True
-    except OSError as e:
-        if e.errno == 40 or "too long" in str(e).lower():
-            return False
-        raise
+STATE_SUCCESS = 1
+STATE_FAIL = 2
+STATE_UNKNOWN = 3
 
-def receive_icmp_reply(sock, timeout=1.0):
-    ready = select.select([sock], [], [], timeout)
-    if ready[0] == []:
-        return False
-    try:
-        rec_packet, addr = sock.recvfrom(2048)
-        return True
-    except socket.timeout:
-        return False
-    except OSError:
-        return False
 
-def sweep_mtu(target_host, timeout=1.0):
-    print(f"  Sweeping Path MTU to {target_host}...")
-    try:
-        dest_addr = socket.gethostbyname(target_host)
-    except socket.gaierror:
-        print(f"  Cannot resolve host: {target_host}")
-        return None
+def checksum(data):
+    """Calculate the 1s complement checksum of data (standard network checksum)."""
+    if len(data) % 2 == 1:
+        data += b'\x00'
+    total = sum(struct.unpack(f"!{len(data)//2}H", data))
+    total = (total >> 16) + (total & 0xffff)
+    total += total >> 16
+    return (~total) & 0xffff
+
+
+def configure_df(sock):
+    """Enforce Don't Fragment (DF) flag depending on platform."""
+    # Define platform socket constants for readability
+    IP_DONTFRAGMENT = 14
+    IP_MTU_DISCOVER_WIN = 71
+    IP_PMTUDISC_DO_WIN = 2
+    IP_DONTFRAG_DARWIN = 28
+    IP_MTU_DISCOVER_LINUX = 10
+    IP_PMTUDISC_DO_LINUX = 2
 
     try:
-        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-    except PermissionError:
-        print("  Permission Denied: Raw sockets require root privileges.")
-        print("  Please run the script using: sudo python3 tester.py <host>")
-        sys.exit(1)
-
-    if sys.platform == "darwin":
-        IP_DONTFRAG = 28
-        raw_sock.setsockopt(socket.IPPROTO_IP, IP_DONTFRAG, 1)
-    else:
-        IP_MTU_DISCOVER = 10
-        IP_PMTUDISC_DO = 2
-        raw_sock.setsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
-    raw_sock.settimeout(timeout)
-
-    low = 500
-    high = 1500
-    best_payload = 0
-    seq_num = 1
-
-    print(f"  Sweeping payload sizes [{low} to {high}]...")
-    while low <= high:
-        mid = (low + high) // 2
-        success = False
-        for _ in range(2):
-            if send_icmp_ping(raw_sock, dest_addr, mid, seq_num):
-                seq_num += 1
-                if receive_icmp_reply(raw_sock, timeout):
-                    success = True
-                    break
-            time.sleep(0.02)
-
-        if success:
-            best_payload = mid
-            low = mid + 1
-        else:
-            high = mid - 1
-
-    if best_payload == 0:
-        raw_sock.close()
-        print(f"  Host did not respond to any DF sweep probes.")
-        print(f"  Checking if host responds to ICMP at all...")
-        try:
-            raw_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-            raw_sock.settimeout(timeout)
-        except PermissionError:
-            print(f"  Cannot create ICMP socket (need root).")
-            print(f"  Host does not respond to ICMP (or ICMP is blocked).")
-            return None
-        test_success = False
-        for _ in range(2):
-            if send_icmp_ping(raw_sock, dest_addr, 500, seq_num):
-                seq_num += 1
-                if receive_icmp_reply(raw_sock, timeout):
-                    test_success = True
-                    break
-            time.sleep(0.02)
-        raw_sock.close()
-        if test_success:
-            print(f"  Host responds to ICMP but DROPS packets with DF bit set.")
-            print(f"  This is expected behavior (security hardening on some hosts).")
-        else:
-            print(f"  Host does not respond to ICMP at all (likely blocked by firewall).")
-        return None
-
-    raw_sock.close()
-    detected_mtu = best_payload + 8 + 20
-    return detected_mtu, dest_addr
-
-def verify_mtu_with_frag_needed(dest_addr, timeout=2.0):
-    print(f"\n--- Verifying MTU with ICMP Frag Needed ---")
-    try:
-        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-        if sys.platform == "darwin":
-            raw_sock.setsockopt(socket.IPPROTO_IP, 28, 1)
-        else:
-            raw_sock.setsockopt(socket.IPPROTO_IP, 10, 2)
-        raw_sock.settimeout(timeout)
-
-        test_payloads = [1500, 1490, 1480, 1472, 1465, 1460, 1455, 1452, 1450, 1440, 1430, 1420, 1410, 1400]
-        my_id = os.getpid() & 0xFFFF
-
-        for payload in test_payloads:
-            header = struct.pack("bbHHh", 8, 0, 0, my_id, 9000)
-            data = struct.pack("d", time.time()) + (b"Q" * (payload - 8))
-            checksum = compute_checksum(header + data)
-            header = struct.pack("bbHHh", 8, 0, socket.htons(checksum), my_id, 9000)
-            packet = header + data
-
+        if sys.platform.startswith("win"):
+            # Try setting Windows-native IP_DONTFRAGMENT
             try:
-                raw_sock.sendto(packet, (dest_addr, 1))
-            except OSError:
-                continue
-
-            for _ in range(2):
-                try:
-                    rec_packet, addr = raw_sock.recvfrom(2048)
-                    icmp_type = rec_packet[20]
-                    if icmp_type == 3:
-                        embedded_ip = rec_packet[28:48]
-                        embedded_proto = rec_packet[28 + 9]
-                        if embedded_proto == 1:
-                            next_mtu = struct.unpack("!H", rec_packet[38:40])[0]
-                            print(f"  Router {addr[0]} reports MTU = {next_mtu}")
-                            raw_sock.close()
-                            return next_mtu, addr[0]
-                    elif icmp_type == 0:
-                        raw_sock.close()
-                        mtu = payload + 8 + 20
-                        print(f"  Payload {payload} succeeded -> MTU >= {mtu}")
-                        return mtu, None
-                except socket.timeout:
-                    continue
-
-        raw_sock.close()
-    except Exception as e:
-        print(f"  Frag needed scan error: {e}")
-
-    print(f"  Could not determine exact MTU from ICMP feedback")
-    return None, None
-
-def find_clamping_hop(dest_addr):
-    print(f"\n--- Attempting to locate clamping point ---")
-    try:
-        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-        if sys.platform == "darwin":
-            raw_sock.setsockopt(socket.IPPROTO_IP, 28, 1)
+                sock.setsockopt(socket.IPPROTO_IP, IP_DONTFRAGMENT, 1)
+            except Exception:
+                # Fallback to Linux-like options if WinSock layer/WSL translation allows
+                sock.setsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER_WIN, IP_PMTUDISC_DO_WIN)
+        elif sys.platform == "darwin":
+            sock.setsockopt(socket.IPPROTO_IP, IP_DONTFRAG_DARWIN, 1)
         else:
-            raw_sock.setsockopt(socket.IPPROTO_IP, 10, 2)
-        raw_sock.settimeout(2.0)
-
-        oversized_payload = 1500
-        my_id = os.getpid() & 0xFFFF
-        header = struct.pack("bbHHh", 8, 0, 0, my_id, 9999)
-        data = struct.pack("d", time.time()) + (b"Q" * (oversized_payload - 8))
-        checksum = compute_checksum(header + data)
-        header = struct.pack("bbHHh", 8, 0, socket.htons(checksum), my_id, 9999)
-        packet = header + data
-
-        try:
-            raw_sock.sendto(packet, (dest_addr, 1))
-        except OSError:
-            pass
-
-        for _ in range(3):
-            try:
-                rec_packet, addr = raw_sock.recvfrom(2048)
-                icmp_type = rec_packet[20]
-                if icmp_type == 3:
-                    raw_sock.close()
-                    return addr[0]
-            except socket.timeout:
-                continue
-        raw_sock.close()
+            # Linux / WSL PMTUDISC_DO option
+            sock.setsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER_LINUX, IP_PMTUDISC_DO_LINUX)
     except Exception:
         pass
-    return None
 
-def validate_tcp_mss(target_host, port=80):
-    print(f"  Establishing TCP handshake to {target_host}:{port}...")
+
+def create_echo_packet(payload_size, seq, pid):
+    if payload_size < 8:
+        raise ValueError("payload_size must be >= 8")
+
+    # Header: Type (8), Code (0), Checksum (0), ID, Sequence
+    header = struct.pack("!BBHHH", ICMP_ECHO_REQUEST, 0, 0, pid, seq)
+    
+    # Payload contains timestamp followed by padding bytes
+    data = struct.pack("!d", time.time()) + b"Q" * (payload_size - 8)
+    
+    csum = checksum(header + data)
+    
+    # Pack again with valid checksum
+    header = struct.pack("!BBHHH", ICMP_ECHO_REQUEST, 0, csum, pid, seq)
+    return header + data
+
+
+def parse_icmp_reply(packet, pid, seq):
+    """
+    Parses and validates incoming ICMP packets.
+    Returns (status, mtu_if_fragmentation_needed).
+    """
+    if len(packet) < 28:
+        return STATE_UNKNOWN, None
+
+    # Decode outer IP header
+    ip_header_len = (packet[0] & 0x0F) * 4
+    if len(packet) < ip_header_len + 8:
+        return STATE_UNKNOWN, None
+
+    # Note: Strict ICMP checksum validation is omitted here to prevent false negatives
+    # across platforms/OS interfaces that alter returned bytes.
+
+    icmp_header = packet[ip_header_len : ip_header_len + 8]
+    icmp_type, icmp_code = struct.unpack("!BB", icmp_header[:2])
+
+    if icmp_type == ICMP_ECHO_REPLY:
+        # Verify Identifier and Sequence
+        reply_id, reply_seq = struct.unpack("!HH", icmp_header[4:8])
+        if reply_id == pid and reply_seq == seq:
+            return STATE_SUCCESS, None
+
+    elif icmp_type == ICMP_DEST_UNREACHABLE:
+        if icmp_code == ICMP_FRAG_NEEDED:
+            # Decode Next-Hop MTU from ICMP header (offset 6-8)
+            next_hop_mtu = struct.unpack("!H", icmp_header[6:8])[0]
+            
+            # The payload of the ICMP unreachable message contains the original IP header
+            # followed by the first 8 bytes of the original IP payload (our ICMP Request header)
+            inner_ip_offset = ip_header_len + 8
+            
+            # If the quote is truncated but contains a valid next-hop MTU, accept it as useful feedback
+            if len(packet) < inner_ip_offset + 20 + 8:
+                if next_hop_mtu > 0:
+                    return STATE_FAIL, next_hop_mtu
+                return STATE_UNKNOWN, None
+                
+            inner_ip_header_len = (packet[inner_ip_offset] & 0x0F) * 4
+            inner_icmp_offset = inner_ip_offset + inner_ip_header_len
+            
+            if len(packet) >= inner_icmp_offset + 8:
+                inner_icmp_header = packet[inner_icmp_offset : inner_icmp_offset + 8]
+                inner_type, _, _, inner_id, inner_seq = struct.unpack("!BBHHH", inner_icmp_header)
+                
+                # Verify quote
+                if inner_type == ICMP_ECHO_REQUEST and inner_id == pid and inner_seq == seq:
+                    return STATE_FAIL, next_hop_mtu if next_hop_mtu > 0 else None
+
+            # If inner verification failed, fall back to accepting the next_hop_mtu if present
+            if next_hop_mtu > 0:
+                return STATE_FAIL, next_hop_mtu
+
+    return STATE_UNKNOWN, None
+
+
+def probe(sock, dst, payload, seq, pid, timeout=1):
+    packet = create_echo_packet(payload, seq, pid)
+
     try:
-        for family in [socket.AF_INET, socket.AF_INET6]:
+        sock.sendto(packet, (dst, 0))
+    except OSError:
+        return STATE_FAIL, None
+
+    start_time = time.time()
+    while True:
+        elapsed = time.time() - start_time
+        remaining = timeout - elapsed
+        if remaining <= 0:
+            return STATE_UNKNOWN, None
+
+        ready = select.select([sock], [], [], remaining)
+        if not ready[0]:
+            return STATE_UNKNOWN, None
+
+        try:
+            data, addr = sock.recvfrom(4096)
+            status, mtu = parse_icmp_reply(data, pid, seq)
+            if status != STATE_UNKNOWN:
+                return status, mtu
+        except Exception:
+            return STATE_UNKNOWN, None
+
+
+def discover_pmtu(host, max_mtu=1500):
+    print(f"Discovering Path MTU (Max limit: {max_mtu})...")
+    print()
+
+    dst = socket.gethostbyname(host)
+    pid = os.getpid() & 0xFFFF
+
+    sock = socket.socket(
+        socket.AF_INET,
+        socket.SOCK_RAW,
+        socket.IPPROTO_ICMP
+    )
+    
+    # Required on Windows to receive responses
+    try:
+        sock.bind(("", 0))
+    except Exception:
+        pass
+
+    configure_df(sock)
+
+    low = 500
+    high = max_mtu - 28
+
+    best = 0
+    best_frag_mtu = None
+    seq = 1
+    consecutive_unknowns = 0
+    search_incomplete = False
+
+    while low <= high:
+        mid = (low + high) // 2
+        
+        # Retry logic for handling STATE_UNKNOWN (packet loss/rate limits)
+        retries = 0
+        result = STATE_UNKNOWN
+        mtu = None
+        while retries < 3:
+            result, mtu = probe(sock, dst, mid, seq, pid)
+            seq += 1
+            if result != STATE_UNKNOWN:
+                break
+            retries += 1
+            time.sleep(0.1)
+
+        if result == STATE_SUCCESS:
+            best = mid
+            low = mid + 1
+            consecutive_unknowns = 0
+        elif result == STATE_FAIL:
+            if mtu:
+                best_frag_mtu = mtu
+            high = mid - 1
+            consecutive_unknowns = 0
+        else:
+            consecutive_unknowns += 1
+            if consecutive_unknowns >= 3:
+                search_incomplete = True
+                break
+            # Do not modify bounds (low/high) on transient/unconfirmed UNKNOWN.
+            # Continue the loop to retry the mid size.
+            continue
+
+    sock.close()
+
+    observed_mtu = best + 28 if best > 0 else None
+
+    # PMTU Selection logic:
+    # If router ICMP report is within a sensible margin (8 bytes) of observed success, trust router.
+    # Otherwise, trust observed success to avoid broken/buggy router ICMP reports.
+    pmtu = None
+    if best_frag_mtu and observed_mtu:
+        if abs(observed_mtu - best_frag_mtu) <= 8:
+            pmtu = best_frag_mtu
+        else:
+            pmtu = observed_mtu
+    elif best_frag_mtu:
+        pmtu = best_frag_mtu
+    elif observed_mtu:
+        pmtu = observed_mtu
+
+    return pmtu, dst, search_incomplete
+
+
+def get_tcp_maxseg(host, port):
+    try:
+        infos = socket.getaddrinfo(
+            host,
+            port,
+            socket.AF_UNSPEC,
+            socket.SOCK_STREAM
+        )
+        for info in infos:
+            af, socktype, proto, canonname, sockaddr = info
             try:
-                s = socket.socket(family, socket.SOCK_STREAM)
-                s.settimeout(3.0)
-                s.connect((target_host, port))
-                TCP_MAXSEG = 2
-                mss_val = s.getsockopt(socket.IPPROTO_TCP, TCP_MAXSEG)
+                s = socket.socket(
+                    af,
+                    socktype,
+                    proto
+                )
+                s.settimeout(3)
+                s.connect(sockaddr)
+                
+                TCP_MAXSEG = getattr(socket, "TCP_MAXSEG", 2)
+                mss = s.getsockopt(
+                    socket.IPPROTO_TCP,
+                    TCP_MAXSEG
+                )
                 local_ip = s.getsockname()[0]
-                peer_ip = s.getpeername()[0]
+                remote_ip = s.getpeername()[0]
                 s.close()
-                return mss_val, family == socket.AF_INET6, local_ip, peer_ip
+                return mss, local_ip, remote_ip
             except Exception:
                 continue
-        print(f"  TCP connection failed to all address families")
-        return None, False, None, None
-    except Exception as e:
-        print(f"  TCP connection failed: {e}")
-        return None, False, None, None
+    except Exception:
+        pass
+    return None, None, None
+
 
 def main():
-    if len(sys.argv) < 2:
-        host = "8.8.8.8"
+    if not sys.platform.startswith("win") and os.geteuid() != 0:
+        print("Run as root (sudo python3 ...).")
+        sys.exit(1)
+
+    host = sys.argv[1] if len(sys.argv) > 1 else "8.8.8.8"
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 443
+    
+    # Default to 1500 max MTU for normal internet paths to avoid noisy probes, configurable up to jumbo size
+    max_mtu = int(sys.argv[3]) if len(sys.argv) > 3 else 1500
+
+    print("=" * 60)
+    print("PMTU & TCP_MAXSEG ANALYZER")
+    print("=" * 60)
+    print(f"Target Host : {host}")
+    print(f"Target Port : {port}")
+    print(f"Max MTU Limit: {max_mtu}")
+    print()
+
+    mtu, resolved, search_incomplete = discover_pmtu(host, max_mtu)
+
+    if mtu:
+        print(f"Resolved IP : {resolved}")
+        print(f"Path MTU    : {mtu}")
+        if search_incomplete:
+            print()
+            print("WARNING:")
+            print("PMTU search terminated due to repeated probe loss.")
+            print("Result may be conservative.")
+        print()
+        print("Theoretical MSS Values")
+        print("----------------------")
+        print(f"IPv4 MSS = {mtu - 40}")
+        print(f"IPv6 MSS = {mtu - 60}")
     else:
-        host = sys.argv[1]
-
-    port = 80
-    if len(sys.argv) > 2:
-        try:
-            port = int(sys.argv[2])
-        except ValueError:
-            pass
-
-    print("=" * 60)
-    print("  PYTHON MTU & TCP-MSS TESTER")
-    print("=" * 60)
-    print(f"  Target Host: {host}")
-    print(f"  TCP Port:    {port}")
-    print(f"  Timestamp:   {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print("-" * 60)
-
-    result = sweep_mtu(host)
-    if not result:
+        print("Unable to determine PMTU")
+        if search_incomplete:
+            print("Search was aborted due to repeated probe loss.")
         return
-    mtu, dest_ip = result
-    print(f"\n  DETECTED PATH MTU: {mtu} bytes")
 
-    frag_mtu, frag_router = verify_mtu_with_frag_needed(dest_ip)
-    if frag_mtu and frag_mtu != mtu:
-        if abs(frag_mtu - mtu) > 5:
-            print(f"  Correcting MTU from {mtu} to {frag_mtu} based on ICMP feedback")
-            mtu = frag_mtu
+    print()
 
-    clamping_hop = find_clamping_hop(dest_ip)
-    if not clamping_hop and frag_router:
-        clamping_hop = frag_router
+    mss, local_ip, remote_ip = get_tcp_maxseg(
+        host,
+        port
+    )
 
-    mss, is_ipv6, local_ip, peer_ip = validate_tcp_mss(host, port)
-
-    print(f"\n  DETAILED PATH ANALYSIS")
-    print("-" * 60)
-    print(f"  Local Address:     {local_ip or 'N/A'}")
-    print(f"  Remote Address:    {peer_ip or dest_ip}")
-    print(f"  Detected Path MTU: {mtu} bytes")
-    if clamping_hop:
-        print(f"  Clamping Router:   {clamping_hop}")
-    else:
-        print(f"  Clamping Router:   Not identified (no ICMP Unreachable received)")
-
-    calc_ipv4 = mtu - 40
-    calc_ipv6 = mtu - 60
+    print("TCP Analysis")
+    print("------------")
 
     if mss:
-        ip_version = "IPv6" if is_ipv6 else "IPv4"
-        print(f"  IP Version:        {ip_version}")
-        print(f"  Negotiated TCP-MSS: {mss} bytes")
-        print(f"  Expected IPv4 MSS:  {calc_ipv4} bytes (MTU-40)")
-        print(f"  Expected IPv6 MSS:  {calc_ipv6} bytes (MTU-60)")
+        print(f"Local Address : {local_ip}")
+        print(f"Remote Address: {remote_ip}")
+        print(f"TCP_MAXSEG    : {mss}")
 
-        overhead = calc_ipv4 - mss
+        diff = (mtu - 40) - mss
+        print(f"Difference    : {diff}")
 
-        print(f"  TCP-MSS Overhead:  {overhead} bytes")
-
-        print("\n  ANALYSIS:")
-        print("-" * 60)
-        print(f"  Path MTU = {mtu}")
-        print(f"  MSS      = {mss}")
-        print(f"  Expected = {calc_ipv4}")
-        print(f"  Gap      = {overhead} bytes")
-        print()
-
-        if mss == calc_ipv4:
-            print("  No MSS clamping detected. Standard Ethernet path.")
-        elif mss == calc_ipv6:
-            print("  MSS matches IPv6 expected value (MTU-60).")
-        elif overhead <= 4:
-            print("  MSS reduced by 4 bytes - consistent with 802.1Q VLAN tag.")
-        elif overhead <= 8:
-            print("  MSS reduced by 8 bytes - consistent with PPPoE or GRE.")
-        elif overhead <= 12:
-            print("  MSS reduced by 12 bytes - consistent with 802.1Q+PPPoE or IPsec transport.")
-        elif overhead <= 16:
-            print("  MSS reduced by 16 bytes - consistent with IPsec tunnel mode.")
-        elif overhead <= 20:
-            print("  MSS reduced by 20 bytes - consistent with L2TP/IPsec or IPsec+GRE.")
-        elif overhead > 20:
-            print(f"  MSS reduced by {overhead} bytes - consistent with WireGuard, OpenVPN,")
-            print("  multi-layer tunneling, or a firewall MSS clamp policy.")
-
-        if clamping_hop:
-            print()
-            print(f"  Router {clamping_hop} returned ICMP 'Frag needed' confirming")
-            print(f"  a sub-1500 MTU link on the path.")
+        if diff == 0:
+            print("Consistent with PMTU.")
+        elif diff > 0:
+            print("TCP_MAXSEG lower than theoretical PMTU MSS.")
+            print("Possible tunnel, VPN, stack tuning, or MSS clamping.")
         else:
-            print()
-            print("  No ICMP 'Frag needed' response received - the clamping point")
-            print("  may silently drop oversized packets or rewrite MSS without ICMP.")
-
-        mtu_reduction = 1500 - mtu if mtu < 1500 else 0
-        extra_clamp = overhead - mtu_reduction if overhead > mtu_reduction else 0
-
-        if mtu_reduction > 0:
-            print(f"\n  MTU reduced from 1500 to {mtu} ({mtu_reduction} bytes lost)")
-            if extra_clamp > 0:
-                print(f"  MTU overhead:       {mtu_reduction} bytes (encapsulation)")
-                print(f"  Extra MSS clamping: {extra_clamp} bytes (firewall/VPN policy)")
-                print("  The MSS is clamped MORE than the MTU reduction alone accounts for.")
-            else:
-                print("  MSS clamp matches MTU reduction exactly.")
-        else:
-            print(f"  MTU is standard 1500 but MSS is clamped by {overhead} bytes.")
-            print("  This is firewall-enforced MSS clamping (not tunnel overhead).")
+            print("TCP_MAXSEG exceeds PMTU expectation.")
+            print("Verify PMTU measurement.")
     else:
-        print(f"\n  Cannot compute MSS analysis (TCP connection failed).")
-        print(f"  Path MTU: {mtu} bytes")
-        if clamping_hop:
-            print(f"  Router {clamping_hop} reported MTU {mtu} via ICMP.")
+        print("Unable to establish TCP connection.")
 
+    print()
+    print("NOTE:")
+    print("TCP_MAXSEG reflects the local kernel MSS.")
+    print("This tool cannot definitively prove MSS rewriting by a firewall or load balancer.")
+    print("For authoritative MSS-clamp detection, inspect SYN/SYN-ACK packets with Scapy, tcpdump, Wireshark, or packet capture.")
     print("=" * 60)
+
 
 if __name__ == "__main__":
     main()

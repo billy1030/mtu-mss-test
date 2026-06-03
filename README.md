@@ -6,15 +6,13 @@ A professional network diagnostic tool written in Python to perform **Path MTU (
 
 ## Key Features
 
-- **Binary-Search Path MTU Sweep** — Uses ICMP Echo Requests with the DF (Don't Fragment) bit set to find the bottleneck MTU
-- **ICMP Frag Needed Verification** — Validates sweep results by probing with decreasing payloads to capture exact router MTU feedback
-- **Clamping Router Identification** — Attempts to locate the specific hop returning ICMP "Frag Needed" messages
-- **TCP-MSS Handshake Negotiation** — Reads the OS-negotiated TCP_MAXSEG value from a real TCP connection
-- **IP Family Detection** — Automatically detects IPv4 vs IPv6
-- **Active MSS Clamping Detection** — Analyzes the gap between Path MTU and Negotiated MSS, separating MTU reduction from extra firewall clamping
-- **Unreachable/DF-Drop Diagnostics** — Detects whether a non-responsive host blocks ICMP entirely or only drops packets with DF set
-- **Cross-Platform** — macOS (IP_DONTFRAG) and Linux (IP_MTU_DISCOVER) support
-- **Zero External Dependencies** — Pure Python standard library only
+- **Binary-Search Path MTU Sweep** — Uses ICMP Echo Requests with the DF (Don't Fragment) bit set to find the bottleneck MTU.
+- **Robust Binary Search Logic** — Resilient to transient packet loss and rate-limiting. Uses retries and abort thresholds to prevent false PMTU reductions.
+- **ICMP Frag Needed Validation** — Extracts next-hop MTU feedback from ICMP Destination Unreachable replies, supporting verified quotes and truncated RFC1191 responses.
+- **TCP-MSS Handshake Negotiation** — Connects via TCP and reads the kernel's negotiated `TCP_MAXSEG` socket option.
+- **Jumbo Frame Support** — Configurable maximum MTU boundaries (e.g. 9000) for testing high-bandwidth jumbo fabrics.
+- **Cross-Platform** — Native support for Linux, macOS, and Windows (via WSL or Admin powershell).
+- **Zero External Dependencies** — Pure Python standard library only.
 
 ---
 
@@ -24,20 +22,17 @@ A professional network diagnostic tool written in Python to perform **Path MTU (
 
 The script constructs custom ICMP Echo Requests using raw sockets with the DF bit enforced:
 
+- **Linux / WSL**: `IP_MTU_DISCOVER` with `IP_PMTUDISC_DO` (value 2)
 - **macOS**: `IP_DONTFRAG` socket option (value 28)
-- **Linux**: `IP_MTU_DISCOVER` with `IP_PMTUDISC_DO` (value 2)
+- **Windows**: `IP_DONTFRAGMENT` option (value 14)
 
-A binary search sweeps payload sizes from 500 to 1500 bytes. If a packet exceeds the path MTU, it's silently dropped and the search range narrows.
+A binary search sweeps payload sizes from 500 up to the configured limit (default: 1500 bytes). If a packet exceeds the path MTU, the router drops it and ideally returns ICMP Type 3 Code 4.
 
 ```
 MTU = Optimal Payload + 8 (ICMP Header) + 20 (IPv4 Header)
 ```
 
-### 2. ICMP Frag Needed Verification
-
-After the binary sweep, the script sends oversized probes from 1500 bytes downward. When a router responds with ICMP type 3 ("Frag Needed"), the embedded next-hop MTU is extracted and used to correct the sweep result. This catches cases where the binary sweep is off due to retries or edge network behavior.
-
-### 3. TCP-MSS Validation
+### 2. TCP-MSS Validation
 
 A standard TCP socket connects to the target host:port. After the three-way handshake, the negotiated `TCP_MAXSEG` socket option is read.
 
@@ -49,22 +44,36 @@ Expected MSS:
 
 ## Prerequisites & Privileges
 
-- **Superuser privileges** — Raw ICMP sockets require `sudo` on both macOS and Linux
-- **Open port** — TCP validation requires a reachable port on the target (e.g., 80, 443)
+- **Superuser privileges** — Raw ICMP sockets require root/administrator privileges on all supported operating systems.
+- **Open port** — TCP validation requires a reachable port on the target (e.g., 80, 443).
 
 ---
 
 ## Usage
 
-```bash
-# Defaults to 8.8.8.8 port 80
-sudo python3 mtu-mss-tester-linux.py
+### Linux & macOS
 
-# Custom target
-sudo python3 mtu-mss-tester-linux.py example.com
+```bash
+# Defaults to 8.8.8.8 port 443 with a max MTU limit of 1500
+sudo python3 mtu-mss-tester-linux.py
 
 # Custom target and port
 sudo python3 mtu-mss-tester-linux.py example.com 443
+
+# Testing Jumbo frame networks (specifying 9000 max MTU limit)
+sudo python3 mtu-mss-tester-linux.py 10.0.0.1 443 9000
+```
+
+### Windows (via WSL)
+
+Since raw sockets on Windows have strict limitations, it is recommended to run the script inside Windows Subsystem for Linux (WSL):
+
+```powershell
+# Run using WSL with root permissions
+wsl sudo python3 mtu-mss-tester-linux.py 8.8.8.8 443
+
+# Jumbo MTU test under WSL
+wsl sudo python3 mtu-mss-tester-linux.py 10.0.0.1 443 9000
 ```
 
 ---
@@ -73,78 +82,31 @@ sudo python3 mtu-mss-tester-linux.py example.com 443
 
 ```
 ============================================================
-  PYTHON MTU & TCP-MSS TESTER
+PMTU & TCP_MAXSEG ANALYZER
 ============================================================
-  Target Host: www.google.com
-  TCP Port:    443
-  Timestamp:   2026-06-03 02:06:29
-------------------------------------------------------------
-  Sweeping Path MTU to www.google.com...
-  Sweeping payload sizes [500 to 1500]...
+Target Host : 8.8.8.8
+Target Port : 443
+Max MTU Limit: 1500
 
-  DETECTED PATH MTU: 1497 bytes
+Discovering Path MTU (Max limit: 1500)...
 
---- Verifying MTU with ICMP Frag Needed ---
-  Payload 1452 succeeded -> MTU >= 1480
-  Correcting MTU from 1497 to 1480 based on ICMP feedback
+Resolved IP : 8.8.8.8
+Path MTU    : 1500
 
---- Attempting to locate clamping point ---
-  Establishing TCP handshake to www.google.com:443...
+Theoretical MSS Values
+----------------------
+IPv4 MSS = 1460
+IPv6 MSS = 1440
 
-  DETAILED PATH ANALYSIS
-------------------------------------------------------------
-  Local Address:     172.16.2.30
-  Remote Address:    142.251.151.119
-  Detected Path MTU: 1480 bytes
-  Clamping Router:   Not identified
-  IP Version:        IPv4
-  Negotiated TCP-MSS: 1338 bytes
-  Expected IPv4 MSS:  1440 bytes (MTU-40)
-  Expected IPv6 MSS:  1420 bytes (MTU-60)
-  TCP-MSS Overhead:  102 bytes
-
-  ANALYSIS:
-------------------------------------------------------------
-  Path MTU = 1480
-  MSS      = 1338
-  Expected = 1440
-  Gap      = 102 bytes
-
-  MSS reduced by 102 bytes - consistent with WireGuard, OpenVPN,
-  multi-layer tunneling, or a firewall MSS clamp policy.
-
-  No ICMP 'Frag needed' response received - the clamping point
-  may silently drop oversized packets or rewrite MSS without ICMP.
-
-  MTU reduced from 1500 to 1480 (20 bytes lost)
-  MTU overhead:       20 bytes (encapsulation)
-  Extra MSS clamping: 82 bytes (firewall/VPN policy)
-  The MSS is clamped MORE than the MTU reduction alone accounts for.
+TCP Analysis
+------------
+Local Address : 192.168.1.50
+Remote Address: 8.8.8.8
+TCP_MAXSEG    : 1460
+Difference    : 0
+Consistent with PMTU.
 ============================================================
 ```
-
----
-
-## Diagnostic Reference
-
-### Overhead Interpretation
-
-| Gap Range | Likely Cause |
-| :--- | :--- |
-| 0 bytes | Standard Ethernet, no clamping |
-| 4 bytes | 802.1Q VLAN tag |
-| 8 bytes | PPPoE or GRE encapsulation |
-| 12 bytes | 802.1Q + PPPoE or IPsec transport mode |
-| 16 bytes | IPsec tunnel mode (ESP) |
-| 20 bytes | L2TP/IPsec or IPsec + GRE |
-| > 20 bytes | WireGuard, OpenVPN, multi-layer tunneling, or firewall MSS clamp policy |
-
-### Host Unreachable Diagnostics
-
-| Sweep Result | DF-Test Result | Meaning |
-| :--- | :--- | :--- |
-| No response | Responds without DF | Host drops DF packets (security hardening, e.g. github.com) |
-| No response | No response either | Host blocks all ICMP (e.g. amazon.com, netflix.com) |
 
 ---
 
