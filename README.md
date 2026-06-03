@@ -7,7 +7,9 @@ A professional network diagnostic tool written in Python to perform **Path MTU (
 ## Key Features
 
 - **Binary-Search Path MTU Sweep** — Uses ICMP Echo Requests with the DF (Don't Fragment) bit set to find the bottleneck MTU.
-- **Robust Binary Search Logic** — Resilient to transient packet loss and rate-limiting. Uses retries and abort thresholds to prevent false PMTU reductions.
+- **Baseline Responsiveness Validation** — Probes the target with small ICMP packets first to verify ICMP responsiveness, preventing noisy pings on hosts that block ICMP completely.
+- **Robust Binary Search & Silent Drop Detection** — Resilient to transient packet loss and rate-limiting. If the target is verified as ICMP-responsive, persistent timeouts at larger sizes are treated as silent drops (MTU exceeded) rather than aborting.
+- **Fallback TCP-MSS Analysis** — Proceeds to retrieve `TCP_MAXSEG` and analyze TCP clamping even if the host blocks ICMP or PMTU cannot be determined.
 - **ICMP Frag Needed Validation** — Extracts next-hop MTU feedback from ICMP Destination Unreachable replies, supporting verified quotes and truncated RFC1191 responses.
 - **TCP-MSS Handshake Negotiation** — Connects via TCP and reads the kernel's negotiated `TCP_MAXSEG` socket option.
 - **Jumbo Frame Support** — Configurable maximum MTU boundaries (e.g. 9000) for testing high-bandwidth jumbo fabrics.
@@ -26,15 +28,17 @@ The script constructs custom ICMP Echo Requests using raw sockets with the DF bi
 - **macOS**: `IP_DONTFRAG` socket option (value 28)
 - **Windows**: `IP_DONTFRAGMENT` option (value 14)
 
-A binary search sweeps payload sizes from 500 up to the configured limit (default: 1500 bytes). If a packet exceeds the path MTU, the router drops it and ideally returns ICMP Type 3 Code 4.
+1. **ICMP Baseline Probe**: The script first tests the target with baseline ICMP packets to verify if it responds to ping. If the target does not respond, PMTU discovery is skipped, and it falls back immediately to TCP Analysis.
+2. **Adaptive Binary Search**: A binary search sweeps payload sizes from 500 up to the configured limit (default: 1500 bytes).
+3. **Silent Drop Handling**: If a packet exceeds the path MTU, routers ideally return ICMP Type 3 Code 4 (Fragmentation Needed). If no reply is received (a timeout), but the host was verified as ICMP-responsive, the tool treats it as a silent drop, adjusting search bounds downward (`high = mid - 1`) rather than failing.
 
 ```
 MTU = Optimal Payload + 8 (ICMP Header) + 20 (IPv4 Header)
 ```
 
-### 2. TCP-MSS Validation
+### 2. TCP-MSS Validation & Fallback
 
-A standard TCP socket connects to the target host:port. After the three-way handshake, the negotiated `TCP_MAXSEG` socket option is read.
+A standard TCP socket connects to the target host:port. After the three-way handshake, the negotiated `TCP_MAXSEG` socket option is read. This runs even if PMTU discovery is skipped.
 
 Expected MSS:
 - **IPv4**: MTU - 40 (20 IP + 20 TCP)
