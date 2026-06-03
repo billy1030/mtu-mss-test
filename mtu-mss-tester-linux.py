@@ -189,13 +189,34 @@ def discover_pmtu(host, max_mtu=1500):
 
     configure_df(sock)
 
+    # First, verify if the target host responds to ICMP echo requests at all
+    print("Verifying target ICMP responsiveness...")
+    icmp_responsive = False
+    seq = 1
+    retries = 0
+    while retries < 3:
+        result, _ = probe(sock, dst, 500, seq, pid)
+        seq += 1
+        if result == STATE_SUCCESS:
+            icmp_responsive = True
+            break
+        retries += 1
+        time.sleep(0.2 * retries)
+
+    if not icmp_responsive:
+        print("Target is unresponsive to ICMP. Skipping Path MTU Discovery.")
+        print()
+        sock.close()
+        return None, dst, False
+
+    print("Target is ICMP responsive. Starting binary search...")
+    print()
+
     low = 500
     high = max_mtu - 28
 
     best = 0
     best_frag_mtu = None
-    seq = 1
-    consecutive_unknowns = 0
     search_incomplete = False
 
     while low <= high:
@@ -211,25 +232,18 @@ def discover_pmtu(host, max_mtu=1500):
             if result != STATE_UNKNOWN:
                 break
             retries += 1
-            time.sleep(0.1)
+            time.sleep(0.2 * retries)
 
         if result == STATE_SUCCESS:
             best = mid
             low = mid + 1
-            consecutive_unknowns = 0
         elif result == STATE_FAIL:
             if mtu:
                 best_frag_mtu = mtu
             high = mid - 1
-            consecutive_unknowns = 0
         else:
-            consecutive_unknowns += 1
-            if consecutive_unknowns >= 3:
-                search_incomplete = True
-                break
-            # Do not modify bounds (low/high) on transient/unconfirmed UNKNOWN.
-            # Continue the loop to retry the mid size.
-            continue
+            # Since target is ICMP responsive, persistent timeout is treated as a silent drop
+            high = mid - 1
 
     sock.close()
 
@@ -308,8 +322,9 @@ def main():
 
     mtu, resolved, search_incomplete = discover_pmtu(host, max_mtu)
 
-    if mtu:
+    if resolved:
         print(f"Resolved IP : {resolved}")
+    if mtu:
         print(f"Path MTU    : {mtu}")
         if search_incomplete:
             print()
@@ -322,10 +337,9 @@ def main():
         print(f"IPv4 MSS = {mtu - 40}")
         print(f"IPv6 MSS = {mtu - 60}")
     else:
-        print("Unable to determine PMTU")
+        print("Path MTU    : Unable to determine (ICMP unresponsive or blocked)")
         if search_incomplete:
             print("Search was aborted due to repeated probe loss.")
-        return
 
     print()
 
@@ -342,19 +356,23 @@ def main():
         print(f"Remote Address: {remote_ip}")
         print(f"TCP_MAXSEG    : {mss}")
 
-        diff = (mtu - 40) - mss
-        print(f"Difference    : {diff}")
+        if mtu:
+            diff = (mtu - 40) - mss
+            print(f"Difference    : {diff}")
 
-        if diff == 0:
-            print("Consistent with PMTU.")
-        elif diff > 0:
-            print("TCP_MAXSEG lower than theoretical PMTU MSS.")
-            print("Possible tunnel, VPN, stack tuning, or MSS clamping.")
+            if diff == 0:
+                print("Consistent with PMTU.")
+            elif diff > 0:
+                print("TCP_MAXSEG lower than theoretical PMTU MSS.")
+                print("Possible tunnel, VPN, stack tuning, or MSS clamping.")
+            else:
+                print("TCP_MAXSEG exceeds PMTU expectation.")
+                print("Verify PMTU measurement.")
         else:
-            print("TCP_MAXSEG exceeds PMTU expectation.")
-            print("Verify PMTU measurement.")
+            print("Difference    : N/A (PMTU undetermined)")
     else:
         print("Unable to establish TCP connection.")
+        print("TIP: To retrieve TCP_MAXSEG, targetPort must be open and reachable to complete the TCP handshake.")
 
     print()
     print("NOTE:")
