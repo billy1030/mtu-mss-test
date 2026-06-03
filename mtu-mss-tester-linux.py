@@ -371,8 +371,13 @@ def main():
             if diff == 0:
                 print("Consistent with PMTU.")
             elif diff > 0:
-                print("TCP_MAXSEG lower than theoretical PMTU MSS.")
-                print("Possible tunnel, VPN, stack tuning, or MSS clamping.")
+                print("TCP_MAXSEG differs from PMTU-derived MSS.")
+                print()
+                print("TCP_MAXSEG reflects a kernel-reported MSS value and")
+                print("may not represent the negotiated SYN/SYN-ACK MSS.")
+                print()
+                print("Use packet capture or SYN inspection to verify")
+                print("actual MSS advertisement.")
             else:
                 print("TCP_MAXSEG exceeds PMTU expectation.")
                 print("Verify PMTU measurement.")
