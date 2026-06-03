@@ -124,6 +124,44 @@ For authoritative MSS-clamp detection, inspect SYN/SYN-ACK packets with Scapy, t
 
 ---
 
+## Interpreting Results & Virtualization Notes
+
+When analyzing output (especially when comparing native environments versus virtualization stacks like WSL), you may observe differences between the Path MTU discovery and `TCP_MAXSEG` values:
+
+### Common Observations
+
+1. **WSL vs. Native Host Discrepancies**:
+   - **Local Address differences**: WSL uses a Hyper-V/NAT virtual network adapter (typically in the `172.17.x.x` space), which introduces virtualization overhead and different TCP stack default policies.
+   - **PMTU variance**: The virtual switch might pass or segment raw ICMP DF packets differently compared to native host adapters, resulting in lower reported PMTUs (e.g. `1420` on WSL vs. `1480` on native).
+2. **DNS Load Balancing Effects**:
+   - Querying a hostname like `www.google.com` can resolve to different IP addresses across runs. Since server-side load balancers and intermediate routing paths might differ, always test using a **fixed target IP address** (e.g. `8.8.8.8`) to remove DNS noise.
+3. **TCP_MAXSEG Stability**:
+   - If the estimated PMTU increases significantly (e.g., from `1420` to `1480`) but the negotiated `TCP_MAXSEG` barely changes, the limitation is likely a fixed local network adapter or TCP stack setting on the host machine rather than path-based MSS clamping.
+
+### Recommended Troubleshooting Commands
+
+To isolate issues and confirm the measurements:
+
+* **Independent PMTU Validation (Linux/WSL)**:
+  ```bash
+  tracepath 8.8.8.8
+  ```
+* **Manual MTU Verification (Windows Command Prompt)**:
+  ```cmd
+  ping -f -l 1472 8.8.8.8
+  ```
+* **Check Host Adapter MTUs (Windows PowerShell)**:
+  ```powershell
+  netsh interface ipv4 show subinterfaces
+  ```
+* **Check WSL Virtual Interface MTU (Linux)**:
+  ```bash
+  ip link show eth0
+  ```
+
+---
+
 ## License
 
 Open-source and free to use. Use responsibly for network auditing and diagnostic purposes.
+
